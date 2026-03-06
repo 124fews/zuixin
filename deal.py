@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -61,15 +61,44 @@ def _load_instance(instance_path: str) -> ProblemInstance:
 
 
 def _normalize_machine_id(raw_id: Any, num_machines: int) -> Optional[int]:
-    try:
-        machine_num = int(raw_id)
-    except (TypeError, ValueError):
+    if raw_id is None:
         return None
 
-    if 0 <= machine_num < num_machines:
-        return machine_num
+    machine_num: Optional[int] = None
+
+    if isinstance(raw_id, str):
+        text = raw_id.strip().lower()
+        if not text:
+            return None
+
+        # 兼容 "machine_1" / "machine1" / "M1" / "机器1" 等常见表达。
+        match = re.search(r"-?\d+", text)
+        if match:
+            try:
+                machine_num = int(match.group())
+            except (TypeError, ValueError):
+                machine_num = None
+        else:
+            try:
+                machine_num = int(text)
+            except (TypeError, ValueError):
+                machine_num = None
+    else:
+        try:
+            machine_num = int(raw_id)
+        except (TypeError, ValueError):
+            machine_num = None
+
+    if machine_num is None:
+        return None
+
+    # 外部输入优先按 1-based 解释（用户语义更常见）；0 保留为首台机器。
+    if machine_num == 0:
+        return 0
     if 1 <= machine_num <= num_machines:
         return machine_num - 1
+    if 0 <= machine_num < num_machines:
+        return machine_num
     return None
 
 
@@ -148,11 +177,11 @@ def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInst
     raw_affected_machines = algorithm_parameters.get("affected_machines", [])
     if isinstance(raw_affected_machines, (list, tuple, set)):
         for raw in raw_affected_machines:
-            machine_id = _normalize_machine_id(str(raw).split("_")[-1], problem.num_machines)
+            machine_id = _normalize_machine_id(raw, problem.num_machines)
             if machine_id is not None:
                 affected_machines.append(machine_id)
     elif raw_affected_machines is not None:
-        machine_id = _normalize_machine_id(str(raw_affected_machines).split("_")[-1], problem.num_machines)
+        machine_id = _normalize_machine_id(raw_affected_machines, problem.num_machines)
         if machine_id is not None:
             affected_machines.append(machine_id)
 
@@ -499,3 +528,4 @@ def submit_job(requirement: str, params_json: Dict[str, Any], session_id: str) -
 
 def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
     return _RESULT_STORE.get(session_id)
+
