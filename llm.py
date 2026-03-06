@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import importlib
 import json
@@ -92,7 +92,7 @@ def _build_llm() -> ChatOpenAI:
         raise RuntimeError(f"LangChain 依赖不可用: {LANGCHAIN_IMPORT_ERROR}")
 
     if not LLM_RUNTIME_CONFIG.api_key:
-        raise RuntimeError("缺少 DEEPSEEK_API_KEY，无法调用大模型")
+        raise RuntimeError("缺少 DEEPSEEK_API_KEY，请在环境变量或 Streamlit secrets 中配置")
 
     return ChatOpenAI(
         model=LLM_RUNTIME_CONFIG.model_name,
@@ -374,16 +374,53 @@ def _load_deal_module():
     return importlib.import_module("deal")
 
 
+def _prepare_algorithm_payload(params_json: Dict[str, Any]) -> Dict[str, Any]:
+    deal = _load_deal_module()
+    if hasattr(deal, "prepare_algorithm_payload"):
+        return deal.prepare_algorithm_payload(params_json)
+    return params_json
+
+
 def submit_to_algorithm(requirement: str, params_json: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     try:
         deal = _load_deal_module()
-        return deal.submit_job(requirement=requirement, params_json=params_json, session_id=session_id)
+        effective_params = _prepare_algorithm_payload(params_json)
+        result = deal.submit_job(requirement=requirement, params_json=effective_params, session_id=session_id)
+        if isinstance(result, dict):
+            result["effective_params"] = effective_params
+        return result
     except Exception as error:
         return {
             "accepted": False,
             "job_id": session_id,
             "message": f"调用 deal.submit_job 失败: {error}",
         }
+
+
+def preview_algorithm_payload(
+    requirement: str,
+    params_json: Dict[str, Any],
+    session_id: str = "default",
+    messages: Optional[List[Dict[str, Any]]] = None,
+    workflow_step: Optional[str] = None,
+) -> Dict[str, Any]:
+    _ = (requirement, messages, workflow_step)
+    if not isinstance(params_json, dict):
+        parsed, error = _parse_json_flexible(params_json)
+        if error or not isinstance(parsed, dict):
+            return {"error": "params_json 不是合法 JSON 对象"}
+        params_json = parsed
+
+    try:
+        effective_params = _prepare_algorithm_payload(params_json)
+    except Exception as error:
+        return {"error": f"预览算法注入参数失败: {error}"}
+
+    state = _get_session_state(session_id)
+    state["last_params"] = params_json
+    state["last_effective_params"] = effective_params
+    _touch_session(session_id)
+    return {"algorithm_payload": effective_params}
 
 
 def fetch_algorithm_result(requirement: str, params_json: Dict[str, Any], session_id: str) -> Optional[Any]:
@@ -525,3 +562,4 @@ def import_final_result(
 
 def get_session_debug_state(session_id: str) -> Dict[str, Any]:
     return _get_session_state(session_id)
+
