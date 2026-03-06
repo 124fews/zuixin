@@ -104,10 +104,16 @@ def _normalize_machine_id(raw_id: Any, num_machines: int) -> Optional[int]:
 
 def _extract_machine_mentions(text: str, num_machines: int) -> List[int]:
     mentions: List[int] = []
-    for match in re.findall(r"(?:机器|machine[_\s-]?)(\d+)", text, flags=re.IGNORECASE):
-        machine_id = _normalize_machine_id(match, num_machines)
-        if machine_id is not None:
-            mentions.append(machine_id)
+    patterns = [
+        r"(?:机器|机)\s*(\d+)\s*(?:号)?",
+        r"\bmachine[_\s-]?(\d+)\b",
+        r"\bM\s*(\d+)\b",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            machine_id = _normalize_machine_id(match, num_machines)
+            if machine_id is not None:
+                mentions.append(machine_id)
     return mentions
 
 
@@ -168,7 +174,20 @@ def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInst
     cooling_rate = min(max(cooling_rate, 0.85), 0.9999)
 
     # 解析故障机器与停机窗口
-    failure_keywords = ["故障", "错误", "不可用", "停机", "down", "failure", "维护"]
+    failure_keywords = [
+        "故障",
+        "错误",
+        "不可用",
+        "不能用",
+        "不可使用",
+        "停用",
+        "停机",
+        "宕机",
+        "down",
+        "failure",
+        "unavailable",
+        "维护",
+    ]
     text_blob = " ".join([requirement] + [str(item) for item in constraints])
     has_failure_hint = any(keyword in text_blob.lower() for keyword in failure_keywords)
 
@@ -203,7 +222,17 @@ def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInst
             if end > start:
                 machine_downtime.append((machine_id, start, end))
 
-    failure_status = bool(algorithm_parameters.get("failure_status", False)) or has_failure_hint
+    action_text = str(algorithm_parameters.get("action", "")).lower()
+    constraints_list_text = " ".join(str(item) for item in algorithm_parameters.get("constraints_list", [])).lower()
+    action_implies_failure = any(token in action_text for token in ["maintenance", "unavailable", "failure", "downtime"])
+    constraints_imply_failure = "machine_unavailable" in constraints_list_text or "unavailable" in constraints_list_text
+
+    failure_status = (
+        bool(algorithm_parameters.get("failure_status", False))
+        or has_failure_hint
+        or action_implies_failure
+        or constraints_imply_failure
+    )
     if failure_status and not machine_downtime:
         for machine_id in sorted(set(affected_machines)):
             machine_downtime.append((machine_id, 0, DEAL_ALNS_CONFIG.failure_block_horizon))
@@ -568,8 +597,3 @@ def submit_job(requirement: str, params_json: Dict[str, Any], session_id: str) -
 
 def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
     return _RESULT_STORE.get(session_id)
-
-def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
-    return _RESULT_STORE.get(session_id)
-
-
