@@ -232,6 +232,46 @@ def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInst
     }
 
 
+def prepare_algorithm_payload(params_json: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    生成实际注入求解器的参数视图。
+    该视图与 run_alns 内部生效配置保持一致，可用于前端回显与提交前核验。
+    """
+    if not isinstance(params_json, dict):
+        raise ValueError("params_json 必须为 dict")
+
+    problem = _load_instance(DEAL_ALNS_CONFIG.instance_path)
+    runtime = _build_runtime_constraints(params_json, problem)
+
+    machine_downtime = [
+        {"machine": machine, "start": start, "end": end}
+        for machine, start, end in runtime["machine_downtime"]
+    ]
+
+    prepared = {
+        "task_type": str(params_json.get("task_type", "reschedule")),
+        "requirement": str(params_json.get("requirement", "")),
+        "objective": runtime["objective"],
+        "constraints": params_json.get("constraints", []),
+        "algorithm_parameters": {
+            "iterations": runtime["iterations"],
+            "destroy_ratio": runtime["destroy_ratio"],
+            "initial_temperature": runtime["initial_temperature"],
+            "cooling_rate": runtime["cooling_rate"],
+            "min_temperature": runtime["min_temperature"],
+            "seed": runtime["rng_seed"],
+            "machine_downtime": machine_downtime,
+            "job_priority": runtime["job_weights"],
+        },
+        "runtime_binding": {
+            "instance": problem.instance_name,
+            "num_jobs": problem.num_jobs,
+            "num_machines": problem.num_machines,
+        },
+    }
+    return prepared
+
+
 def _create_initial_sequence(problem: ProblemInstance, rng: random.Random) -> List[int]:
     sequence: List[int] = []
     for job_index, job_ops in enumerate(problem.jobs):
@@ -528,4 +568,8 @@ def submit_job(requirement: str, params_json: Dict[str, Any], session_id: str) -
 
 def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
     return _RESULT_STORE.get(session_id)
+
+def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
+    return _RESULT_STORE.get(session_id)
+
 
