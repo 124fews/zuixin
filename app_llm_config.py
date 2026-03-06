@@ -46,7 +46,7 @@ APP_STEP_TEXT = {
 @dataclass(frozen=True)
 class LLMRuntimeConfig:
     model_name: str = os.getenv("LLM_MODEL", "deepseek-chat")
-    api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
+    api_key: str = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
     api_base: str = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0"))
 
@@ -97,3 +97,4 @@ class DealALNSConfig:
 
 
 DEAL_ALNS_CONFIG = DealALNSConfig()
+
