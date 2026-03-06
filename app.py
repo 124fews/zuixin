@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import inspect
 import json
 import os
@@ -11,6 +11,7 @@ from app_llm_config import (
     APP_LLM_FEEDBACK_FN,
     APP_LLM_IMPORT_PARAM_FN,
     APP_LLM_IMPORT_RESULT_FN,
+    APP_LLM_PREVIEW_ALGO_FN,
     APP_LLM_MODULE,
     APP_SESSIONS_DIR,
     APP_STEP_ORDER,
@@ -49,6 +50,7 @@ LLM_IMPORT_PARAM_FN = APP_LLM_IMPORT_PARAM_FN
 LLM_FEEDBACK_FN = APP_LLM_FEEDBACK_FN
 LLM_IMPORT_RESULT_FN = APP_LLM_IMPORT_RESULT_FN
 LLM_DEBUG_FN = APP_LLM_DEBUG_FN
+LLM_PREVIEW_ALGO_FN = APP_LLM_PREVIEW_ALGO_FN
 STEP_ORDER = APP_STEP_ORDER
 STEP_TEXT = APP_STEP_TEXT
 
@@ -71,6 +73,7 @@ def init_state() -> None:
         "messages": [],
         "workflow_step": "draft",
         "user_requirement": "",
+        "llm_raw_params": None,
         "llm_params": None,
         "llm_meta": None,
         "reject_feedback": "",
@@ -88,6 +91,7 @@ def reset_workflow() -> None:
     """仅重置当前业务流程状态，不更换会话 ID。"""
     st.session_state.workflow_step = "draft"
     st.session_state.user_requirement = ""
+    st.session_state.llm_raw_params = None
     st.session_state.llm_params = None
     st.session_state.llm_meta = None
     st.session_state.reject_feedback = ""
@@ -112,6 +116,7 @@ def save_session() -> None:
         "messages": st.session_state.messages,
         "workflow_step": st.session_state.workflow_step,
         "user_requirement": st.session_state.user_requirement,
+        "llm_raw_params": st.session_state.llm_raw_params,
         "llm_params": st.session_state.llm_params,
         "llm_meta": st.session_state.llm_meta,
         "reject_feedback": st.session_state.reject_feedback,
@@ -149,6 +154,7 @@ def load_session(session_name: str) -> None:
         st.session_state.messages = data.get("messages", [])
         st.session_state.workflow_step = data.get("workflow_step", "draft")
         st.session_state.user_requirement = data.get("user_requirement", "")
+        st.session_state.llm_raw_params = data.get("llm_raw_params")
         st.session_state.llm_params = data.get("llm_params")
         st.session_state.llm_meta = data.get("llm_meta")
         st.session_state.reject_feedback = data.get("reject_feedback", "")
@@ -323,6 +329,29 @@ def import_llm_params() -> Tuple[Optional[Any], Optional[Dict[str, Any]], Option
         return None, meta, error
 
     return params_json, meta, None
+
+
+def preview_algorithm_payload(params_json: Any) -> Tuple[Optional[Any], Optional[str]]:
+    """调用 llm.preview_algorithm_payload，得到算法实际注入参数。"""
+    context = {
+        "requirement": st.session_state.user_requirement,
+        "params_json": params_json,
+        "session_id": st.session_state.current_session,
+        "messages": st.session_state.messages,
+        "workflow_step": st.session_state.workflow_step,
+    }
+    raw, error = call_llm_function(LLM_PREVIEW_ALGO_FN, context)
+    if error:
+        return None, error
+
+    payload, error = extract_response(raw, ["algorithm_payload", "data", "result", "payload"])
+    if error:
+        return None, error
+
+    preview_json, error = ensure_json_result(payload, "算法生效参数")
+    if error:
+        return None, error
+    return preview_json, None
 
 
 def submit_user_feedback(is_correct: bool, user_feedback: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -606,6 +635,7 @@ with tab1:
             add_message("user", content)
             send_to_outbox("request_param_json", {"requirement": content})
             st.session_state.workflow_step = "awaiting_llm_json"
+            st.session_state.llm_raw_params = None
             st.session_state.llm_params = None
             st.session_state.llm_meta = None
             st.session_state.final_result = None
@@ -617,13 +647,27 @@ with tab1:
                 st.error(f"参数自动生成失败：{error}")
                 st.info("你可以在步骤2点击“重新生成参数 JSON”进行重试。")
             else:
-                st.session_state.llm_params = params
+                st.session_state.llm_raw_params = params
+                effective_params, preview_error = preview_algorithm_payload(params)
+                st.session_state.llm_params = effective_params if not preview_error else params
                 st.session_state.llm_meta = meta
                 st.session_state.workflow_step = "awaiting_confirmation"
                 add_message("assistant", "已自动生成参数 JSON，请核验。")
-                send_to_outbox("llm_params_imported", {"params_json": params, "meta": meta, "source": "auto"})
+                send_to_outbox(
+                    "llm_params_imported",
+                    {
+                        "params_json": st.session_state.llm_params,
+                        "raw_params_json": st.session_state.llm_raw_params,
+                        "meta": meta,
+                        "source": "auto",
+                    },
+                )
                 save_session()
-                st.success("参数 JSON 已自动生成，请在步骤2核验。")
+                if preview_error:
+                    st.warning(f"参数已生成，但算法生效参数预览失败：{preview_error}")
+                    st.info("当前回显为原始参数；提交后仍可继续求解。")
+                else:
+                    st.success("参数 JSON 已自动生成，请在步骤2核验。")
 
 with tab2:
     st.markdown("### 参数 JSON 核验")
@@ -637,17 +681,48 @@ with tab2:
             if error:
                 st.error(error)
             else:
-                st.session_state.llm_params = params
+                st.session_state.llm_raw_params = params
+                effective_params, preview_error = preview_algorithm_payload(params)
+                st.session_state.llm_params = effective_params if not preview_error else params
                 st.session_state.llm_meta = meta
                 st.session_state.workflow_step = "awaiting_confirmation"
                 add_message("assistant", "已重新生成参数 JSON，请核验。")
-                send_to_outbox("llm_params_imported", {"params_json": params, "meta": meta, "source": "manual_retry"})
+                send_to_outbox(
+                    "llm_params_imported",
+                    {
+                        "params_json": st.session_state.llm_params,
+                        "raw_params_json": st.session_state.llm_raw_params,
+                        "meta": meta,
+                        "source": "manual_retry",
+                    },
+                )
                 save_session()
-                st.success("参数 JSON 重新生成成功，请确认。")
+                if preview_error:
+                    st.warning(f"参数已生成，但算法生效参数预览失败：{preview_error}")
+                    st.info("当前回显为原始参数；提交后仍可继续求解。")
+                else:
+                    st.success("参数 JSON 重新生成成功，请确认。")
 
     if st.session_state.llm_params is not None:
-        st.markdown("#### 参数回显")
-        st.json(st.session_state.llm_params)
+        st.markdown("#### 参数回显（即将注入算法框架）")
+        view_col, note_col = st.columns([3, 2])
+        with view_col:
+            st.json(st.session_state.llm_params)
+        with note_col:
+            st.markdown("**中文注释**")
+            st.markdown(
+                "- `task_type`：调度动作类型，当前通常为重排产。\n"
+                "- `requirement`：用户原始约束文本（用于追溯）。\n"
+                "- `objective`：实际生效目标函数（已做归一化）。\n"
+                "- `algorithm_parameters.iterations`：ALNS 迭代次数。\n"
+                "- `algorithm_parameters.machine_downtime`：最终生效停机窗口。\n"
+                "- `algorithm_parameters.job_priority`：作业权重配置（可选）。\n"
+                "- `runtime_binding`：绑定的算例与规模信息。"
+            )
+
+        if st.session_state.llm_raw_params is not None:
+            with st.expander("查看原始大模型参数（仅调试）"):
+                st.json(st.session_state.llm_raw_params)
 
         if st.session_state.llm_meta:
             with st.expander("参数生成元信息(meta)"):
@@ -722,6 +797,7 @@ with tab2:
                             },
                         )
                         st.session_state.workflow_step = "awaiting_llm_json"
+                        st.session_state.llm_raw_params = None
                         st.session_state.llm_params = None
                         st.session_state.llm_meta = None
                         st.session_state.final_result = None
