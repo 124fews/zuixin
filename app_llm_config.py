@@ -51,6 +51,7 @@ APP_LLM_IMPORT_PARAM_FN = "import_param_json"
 APP_LLM_FEEDBACK_FN = "handle_user_feedback"
 APP_LLM_IMPORT_RESULT_FN = "import_final_result"
 APP_LLM_DEBUG_FN = "get_session_debug_state"
+APP_LLM_PREVIEW_ALGO_FN = "preview_algorithm_payload"
 
 APP_STEP_ORDER = [
     "draft",
@@ -126,9 +127,3 @@ class DealALNSConfig:
 
 
 DEAL_ALNS_CONFIG = DealALNSConfig()
-
-
-
-DEAL_ALNS_CONFIG = DealALNSConfig()
-
-
