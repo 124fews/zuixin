@@ -354,6 +354,29 @@ def preview_algorithm_payload(params_json: Any) -> Tuple[Optional[Any], Optional
     return preview_json, None
 
 
+def refresh_effective_params_if_needed() -> Optional[str]:
+    """
+    兜底刷新算法生效参数：
+    兼容旧会话中仅保存了原始参数、未包含 iterations 等求解默认项的情况。
+    """
+    current = st.session_state.llm_params
+    if not isinstance(current, dict):
+        return None
+
+    algo = current.get("algorithm_parameters")
+    if isinstance(algo, dict) and "iterations" in algo:
+        return None
+
+    source = st.session_state.llm_raw_params if isinstance(st.session_state.llm_raw_params, dict) else current
+    effective, error = preview_algorithm_payload(source)
+    if error:
+        return error
+    if isinstance(effective, dict):
+        st.session_state.llm_params = effective
+        return None
+    return "算法生效参数预览返回格式异常"
+
+
 def submit_user_feedback(is_correct: bool, user_feedback: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """调用 llm.handle_user_feedback 处理用户确认或驳回意见。"""
     context = {
@@ -704,6 +727,10 @@ with tab2:
                     st.success("参数 JSON 重新生成成功，请确认。")
 
     if st.session_state.llm_params is not None:
+        refresh_error = refresh_effective_params_if_needed()
+        if refresh_error:
+            st.warning(f"算法生效参数刷新失败：{refresh_error}")
+
         st.markdown("#### 参数回显（即将注入算法框架）")
         view_col, note_col = st.columns([3, 2])
         with view_col:
