@@ -1,5 +1,34 @@
-﻿import os
+import os
 from dataclasses import dataclass
+
+
+def _read_api_key() -> str:
+    """优先读取本地环境变量，读取不到再读取 Streamlit secrets。"""
+    env_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    try:
+        import streamlit as st
+    except Exception:
+        return ""
+
+    try:
+        secrets = st.secrets
+    except Exception:
+        return ""
+
+    top_key = str(secrets.get("DEEPSEEK_API_KEY", "")).strip()
+    if top_key:
+        return top_key
+
+    llm_group = secrets.get("llm")
+    if hasattr(llm_group, "get"):
+        group_key = str(llm_group.get("api_key", "")).strip()
+        if group_key:
+            return group_key
+
+    return ""
 
 
 # ------------------------
@@ -46,7 +75,7 @@ APP_STEP_TEXT = {
 @dataclass(frozen=True)
 class LLMRuntimeConfig:
     model_name: str = os.getenv("LLM_MODEL", "deepseek-chat")
-    api_key: str = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
+    api_key: str = _read_api_key()
     api_base: str = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0"))
 
@@ -97,4 +126,9 @@ class DealALNSConfig:
 
 
 DEAL_ALNS_CONFIG = DealALNSConfig()
+
+
+
+DEAL_ALNS_CONFIG = DealALNSConfig()
+
 
