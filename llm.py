@@ -27,6 +27,22 @@ except Exception as error:  # pragma: no cover
 
 SESSION_MEMORY: Dict[str, Dict[str, Any]] = {}
 
+FAILURE_HINT_KEYWORDS = [
+    "故障",
+    "错误",
+    "停机",
+    "不可用",
+    "不能用",
+    "不可使用",
+    "停用",
+    "宕机",
+    "维护",
+    "down",
+    "failure",
+    "unavailable",
+    "out of service",
+]
+
 
 def _get_session_state(session_id: str) -> Dict[str, Any]:
     if session_id not in SESSION_MEMORY:
@@ -134,12 +150,26 @@ def _fallback_semantic_extract(requirement: str) -> Dict[str, Any]:
 
 
 def _extract_machine_for_la05(text: str) -> List[str]:
+    if not isinstance(text, str):
+        return []
+
     machines: List[str] = []
-    for match in re.findall(r"(?:机器|machine[_\s-]?)(\d+)", text, flags=re.IGNORECASE):
-        machine_num = int(match)
-        # 统一按 1-based 文本表达保留，deal.py 会做归一化。
-        machines.append(f"machine_{machine_num}")
+    patterns = [
+        r"(?:机器|机)\s*(\d+)\s*(?:号)?",
+        r"\bmachine[_\s-]?(\d+)\b",
+        r"\bM\s*(\d+)\b",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            machine_num = int(match)
+            # 统一按 1-based 文本表达保留，deal.py 会做归一化。
+            machines.append(f"machine_{machine_num}")
     return list(dict.fromkeys(machines))
+
+
+def _has_failure_hint(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in FAILURE_HINT_KEYWORDS)
 
 
 def _fallback_param_json(
@@ -148,9 +178,13 @@ def _fallback_param_json(
     rag_context: List[Dict[str, Any]],
     feedback_history: List[str],
 ) -> Dict[str, Any]:
-    requirement_lower = requirement.lower()
-    failure_hint = any(keyword in requirement_lower for keyword in ["故障", "错误", "停机", "不可用", "failure", "down"])
-    affected_machines = _extract_machine_for_la05(requirement)
+    semantic_summary = str(semantics.get("summary", ""))
+    semantic_constraints = " ".join(str(item) for item in semantics.get("constraints", []))
+    semantic_entities = " ".join(str(item) for item in semantics.get("entities", []))
+    text_blob = f"{requirement} {semantic_summary} {semantic_constraints} {semantic_entities}"
+
+    failure_hint = _has_failure_hint(text_blob)
+    affected_machines = _extract_machine_for_la05(text_blob)
 
     algorithm_parameters: Dict[str, Any] = {
         "affected_machines": affected_machines,
@@ -187,13 +221,40 @@ def _enrich_algorithm_parameters(params_json: Dict[str, Any]) -> Dict[str, Any]:
     algo_params: Dict[str, Any] = params["algorithm_parameters"]
     requirement = str(params.get("requirement", ""))
     joined_constraints = " ".join(str(item) for item in params.get("constraints", []))
-    text_blob = f"{requirement} {joined_constraints}"
+    semantic = params.get("semantic", {})
+    semantic_summary = str(semantic.get("summary", "")) if isinstance(semantic, dict) else ""
+    semantic_constraints = " ".join(str(item) for item in semantic.get("constraints", [])) if isinstance(semantic, dict) else ""
+    semantic_entities = " ".join(str(item) for item in semantic.get("entities", [])) if isinstance(semantic, dict) else ""
+    algo_constraints_list = " ".join(str(item) for item in algo_params.get("constraints_list", []))
+    action_text = str(algo_params.get("action", "")).lower()
+    text_blob = " ".join(
+        [
+            requirement,
+            joined_constraints,
+            semantic_summary,
+            semantic_constraints,
+            semantic_entities,
+            algo_constraints_list,
+            action_text,
+        ]
+    )
 
-    failure_hint = any(keyword in text_blob.lower() for keyword in ["故障", "错误", "停机", "不可用", "failure", "down", "维护"])
-    if "affected_machines" not in algo_params:
-        machines = _extract_machine_for_la05(text_blob)
-        if machines:
-            algo_params["affected_machines"] = machines
+    failure_hint = _has_failure_hint(text_blob)
+    if "maintenance" in action_text or "unavailable" in action_text:
+        failure_hint = True
+
+    extracted_from_text = _extract_machine_for_la05(text_blob)
+    existing_machines_raw = algo_params.get("affected_machines", [])
+    existing_machines: List[str] = []
+    if isinstance(existing_machines_raw, (list, tuple, set)):
+        for item in existing_machines_raw:
+            existing_machines.extend(_extract_machine_for_la05(str(item)))
+    elif existing_machines_raw is not None:
+        existing_machines.extend(_extract_machine_for_la05(str(existing_machines_raw)))
+
+    merged_machines = list(dict.fromkeys(existing_machines + extracted_from_text))
+    if merged_machines:
+        algo_params["affected_machines"] = merged_machines
 
     if failure_hint:
         algo_params.setdefault("failure_status", True)
@@ -562,4 +623,9 @@ def import_final_result(
 
 def get_session_debug_state(session_id: str) -> Dict[str, Any]:
     return _get_session_state(session_id)
+
+
+def get_session_debug_state(session_id: str) -> Dict[str, Any]:
+    return _get_session_state(session_id)
+
 
