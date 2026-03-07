@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+"""排产算法执行层（ALNS）。
+
+职责：
+1) 读取算例（la05.json）。
+2) 将 llm/app 传入参数归一化为可执行约束。
+3) 运行 ALNS 求解并缓存结果，供前端轮询读取。
+"""
+
 import json
+import hashlib
 import math
 import random
 import re
@@ -8,11 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app_llm_config import DEAL_ALNS_CONFIG
+from app_llm_config import DEAL_ALNS_CONFIG, DEAL_RESULT_CACHE_MAX
 
 
 @dataclass
 class ProblemInstance:
+    """算例结构：作业数、机器数、每个作业的工序列表。"""
+
     instance_name: str
     num_jobs: int
     num_machines: int
@@ -21,6 +32,8 @@ class ProblemInstance:
 
 @dataclass
 class DecodedSolution:
+    """序列解经解码后的结构化结果。"""
+
     sequence: List[int]
     operations: List[Dict[str, Any]]
     job_completion_times: Dict[str, int]
@@ -34,7 +47,28 @@ _INSTANCE_CACHE: Optional[ProblemInstance] = None
 _RESULT_STORE: Dict[str, Dict[str, Any]] = {}
 
 
+def _compute_payload_digest(payload: Dict[str, Any]) -> str:
+    """计算参数 JSON 的稳定摘要，用于结果一致性校验。"""
+    normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def _put_result(session_id: str, result: Dict[str, Any], params_digest: str) -> None:
+    """写入结果缓存并按上限淘汰最早条目。"""
+    _RESULT_STORE[session_id] = {
+        "result": result,
+        "params_digest": params_digest,
+    }
+    max_size = DEAL_RESULT_CACHE_MAX
+    if max_size > 0:
+        while len(_RESULT_STORE) > max_size:
+            oldest_key = next(iter(_RESULT_STORE))
+            _RESULT_STORE.pop(oldest_key, None)
+
+
 def _load_instance(instance_path: str) -> ProblemInstance:
+    """加载并缓存算例文件，避免每次求解重复读盘。"""
+
     global _INSTANCE_CACHE
     if _INSTANCE_CACHE is not None:
         return _INSTANCE_CACHE
@@ -61,6 +95,8 @@ def _load_instance(instance_path: str) -> ProblemInstance:
 
 
 def _normalize_machine_id(raw_id: Any, num_machines: int) -> Optional[int]:
+    """将外部机器标识归一化为内部 0-based 机器索引。"""
+
     if raw_id is None:
         return None
 
@@ -103,6 +139,8 @@ def _normalize_machine_id(raw_id: Any, num_machines: int) -> Optional[int]:
 
 
 def _extract_machine_mentions(text: str, num_machines: int) -> List[int]:
+    """从自然语言里抽取机器编号（返回 0-based 索引列表）。"""
+
     mentions: List[int] = []
     patterns = [
         r"(?:机器|机)\s*(\d+)\s*(?:号)?",
@@ -118,6 +156,8 @@ def _extract_machine_mentions(text: str, num_machines: int) -> List[int]:
 
 
 def _safe_int(value: Any, default: int) -> int:
+    """安全转换为 int，失败时返回默认值。"""
+
     try:
         if isinstance(value, bool):
             return int(value)
@@ -134,6 +174,8 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 def _safe_float(value: Any, default: float) -> float:
+    """安全转换为 float，失败时返回默认值。"""
+
     try:
         if isinstance(value, bool):
             return float(int(value))
@@ -148,6 +190,14 @@ def _safe_float(value: Any, default: float) -> float:
 
 
 def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInstance) -> Dict[str, Any]:
+    """把上游参数归一化为求解器运行时约束。
+
+    该函数会：
+    1) 合并默认 ALNS 参数；
+    2) 识别故障语义与受影响机器；
+    3) 生成最终的停机窗口和作业权重。
+    """
+
     requirement = str(params_json.get("requirement", ""))
     objective = str(params_json.get("objective", "minimize_makespan"))
     if objective not in {"minimize_makespan", "weighted_completion", "minimize_weighted_completion"}:
@@ -233,6 +283,9 @@ def _build_runtime_constraints(params_json: Dict[str, Any], problem: ProblemInst
         or action_implies_failure
         or constraints_imply_failure
     )
+    if failure_status and not machine_downtime and not affected_machines:
+        raise ValueError("检测到停机/故障约束，但未识别到机器编号，请在约束中明确机器（如：机器1停机2小时）")
+
     if failure_status and not machine_downtime:
         for machine_id in sorted(set(affected_machines)):
             machine_downtime.append((machine_id, 0, DEAL_ALNS_CONFIG.failure_block_horizon))
@@ -273,7 +326,8 @@ def prepare_algorithm_payload(params_json: Dict[str, Any]) -> Dict[str, Any]:
     runtime = _build_runtime_constraints(params_json, problem)
 
     machine_downtime = [
-        {"machine": machine, "start": start, "end": end}
+        # 对外统一返回 1-based 机器表达，避免再次注入时发生二次归一化偏移。
+        {"machine": f"machine_{machine + 1}", "start": start, "end": end}
         for machine, start, end in runtime["machine_downtime"]
     ]
 
@@ -302,6 +356,8 @@ def prepare_algorithm_payload(params_json: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _create_initial_sequence(problem: ProblemInstance, rng: random.Random) -> List[int]:
+    """构造初始作业序列（按作业展开后随机打乱）。"""
+
     sequence: List[int] = []
     for job_index, job_ops in enumerate(problem.jobs):
         sequence.extend([job_index] * len(job_ops))
@@ -310,6 +366,8 @@ def _create_initial_sequence(problem: ProblemInstance, rng: random.Random) -> Li
 
 
 def _adjust_start_for_downtime(machine: int, start: int, duration: int, downtime_by_machine: Dict[int, List[Tuple[int, int]]]) -> int:
+    """若工序与停机窗口重叠，则把开始时间推迟到停机结束。"""
+
     current_start = start
     intervals = downtime_by_machine.get(machine, [])
 
@@ -327,6 +385,8 @@ def _decode_sequence(
     machine_downtime: List[Tuple[int, int, int]],
     job_weights: Dict[str, float],
 ) -> DecodedSolution:
+    """把作业序列解码为可执行排程并计算目标值。"""
+
     job_next_op = [0] * problem.num_jobs
     job_ready_time = [0] * problem.num_jobs
     machine_ready_time = [0] * problem.num_machines
@@ -389,6 +449,8 @@ def _decode_sequence(
 
 
 def _destroy_random(sequence: List[int], remove_count: int, rng: random.Random) -> Tuple[List[int], List[int]]:
+    """随机破坏算子：随机移除若干位置。"""
+
     if remove_count <= 0:
         return list(sequence), []
 
@@ -407,6 +469,8 @@ def _destroy_random(sequence: List[int], remove_count: int, rng: random.Random) 
 
 
 def _destroy_segment(sequence: List[int], remove_count: int, rng: random.Random) -> Tuple[List[int], List[int]]:
+    """片段破坏算子：移除连续片段。"""
+
     if remove_count <= 0 or remove_count >= len(sequence):
         if remove_count <= 0:
             return list(sequence), []
@@ -419,6 +483,8 @@ def _destroy_segment(sequence: List[int], remove_count: int, rng: random.Random)
 
 
 def _repair_random_insert(partial: List[int], removed: List[int], rng: random.Random) -> List[int]:
+    """随机修复算子：把移除元素随机插回。"""
+
     candidate = list(partial)
     for job in removed:
         insert_pos = rng.randint(0, len(candidate))
@@ -434,6 +500,8 @@ def _repair_greedy_insert(
     machine_downtime: List[Tuple[int, int, int]],
     job_weights: Dict[str, float],
 ) -> List[int]:
+    """贪心修复算子：逐个元素尝试所有插入位，选目标最优。"""
+
     candidate = list(partial)
     for job in removed:
         best_seq = None
@@ -449,6 +517,8 @@ def _repair_greedy_insert(
 
 
 def _roulette_select(weight_map: Dict[str, float], rng: random.Random) -> str:
+    """按权重轮盘赌选择算子名称。"""
+
     items = list(weight_map.items())
     total = sum(max(value, 0.001) for _, value in items)
     pivot = rng.random() * total
@@ -461,6 +531,8 @@ def _roulette_select(weight_map: Dict[str, float], rng: random.Random) -> str:
 
 
 def run_alns(params_json: Dict[str, Any]) -> Dict[str, Any]:
+    """运行 ALNS 主流程并返回结构化求解结果。"""
+
     problem = _load_instance(DEAL_ALNS_CONFIG.instance_path)
     runtime = _build_runtime_constraints(params_json, problem)
 
@@ -568,14 +640,23 @@ def run_alns(params_json: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def solve_from_params(params_json: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
+def solve_from_params(
+    params_json: Dict[str, Any],
+    session_id: Optional[str] = None,
+    params_digest: Optional[str] = None,
+) -> Dict[str, Any]:
+    """对外求解入口：执行 ALNS，并可按会话缓存结果。"""
+
     result = run_alns(params_json)
     if session_id:
-        _RESULT_STORE[session_id] = result
+        digest = params_digest or _compute_payload_digest(params_json)
+        _put_result(session_id, result, digest)
     return result
 
 
 def submit_job(requirement: str, params_json: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    """任务提交接口：供 llm.py 调用，返回轻量提交响应。"""
+
     _ = requirement
     if not isinstance(params_json, dict):
         return {
@@ -584,16 +665,32 @@ def submit_job(requirement: str, params_json: Dict[str, Any], session_id: str) -
             "message": "params_json 必须为 dict",
         }
 
-    result = solve_from_params(params_json, session_id=session_id)
+    params_digest = _compute_payload_digest(params_json)
+    result = solve_from_params(params_json, session_id=session_id, params_digest=params_digest)
     return {
         "accepted": True,
         "job_id": session_id,
         "message": "ALNS 已执行完成",
+        "params_digest": params_digest,
         "objective": result.get("objective"),
         "makespan": result.get("makespan"),
         "objective_value": result.get("objective_value"),
     }
 
 
-def get_job_result(session_id: str) -> Optional[Dict[str, Any]]:
-    return _RESULT_STORE.get(session_id)
+def get_job_result(session_id: str, expected_digest: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """按会话 ID 获取缓存的求解结果。"""
+
+    payload = _RESULT_STORE.get(session_id)
+    if payload is None:
+        return None
+
+    # 兼容旧缓存格式（直接存 result dict）
+    if "result" not in payload:
+        return payload
+
+    result = payload.get("result")
+    params_digest = payload.get("params_digest")
+    if expected_digest and params_digest and expected_digest != params_digest:
+        return None
+    return result
