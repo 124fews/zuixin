@@ -12,6 +12,7 @@ from app_llm_config import (
     APP_LLM_IMPORT_PARAM_FN,
     APP_LLM_IMPORT_RESULT_FN,
     APP_LLM_PREVIEW_ALGO_FN,
+    APP_LLM_AUTO_RELOAD,
     APP_LLM_MODULE,
     APP_SESSIONS_DIR,
     APP_STEP_ORDER,
@@ -51,6 +52,7 @@ LLM_FEEDBACK_FN = APP_LLM_FEEDBACK_FN
 LLM_IMPORT_RESULT_FN = APP_LLM_IMPORT_RESULT_FN
 LLM_DEBUG_FN = APP_LLM_DEBUG_FN
 LLM_PREVIEW_ALGO_FN = APP_LLM_PREVIEW_ALGO_FN
+LLM_AUTO_RELOAD = APP_LLM_AUTO_RELOAD
 STEP_ORDER = APP_STEP_ORDER
 STEP_TEXT = APP_STEP_TEXT
 
@@ -219,7 +221,20 @@ def call_llm_function(function_name: str, context: Dict[str, Any]) -> Tuple[Opti
     except Exception as error:
         return None, f"导入 `{LLM_MODULE}` 失败: {error}"
 
+    if LLM_AUTO_RELOAD:
+        try:
+            module = importlib.reload(module)
+        except Exception as error:
+            return None, f"自动重载 `{LLM_MODULE}` 失败: {error}"
+
     target = getattr(module, function_name, None)
+    # 兜底：函数名找不到时尝试 reload 一次，避免开发期缓存导致的“改了没生效”。
+    if not callable(target):
+        try:
+            module = importlib.reload(module)
+            target = getattr(module, function_name, None)
+        except Exception:
+            target = None
     if not callable(target):
         return None, f"`{LLM_MODULE}` 中未找到可调用函数 `{function_name}`。"
 
@@ -582,8 +597,10 @@ def render_schedule_result(result: Any) -> None:
     st.warning("结果结构不标准，展示原始内容。")
     st.json(result)
 
+# 初始化会话状态（首次进入页面时注入默认值）。
 init_state()
 
+# 页面主标题与说明。
 st.title("排产前端工作台")
 st.caption("前端负责约束输入与确认，参数提取/校验/算法接口由 llm.py 负责。")
 
@@ -596,6 +613,7 @@ st.progress(current_index / len(STEP_ORDER))
 st.write(f"当前步骤: {STEP_TEXT[current_step]}")
 
 with st.sidebar:
+    # 侧边栏：会话管理 + llm 接口约定。
     st.subheader("会话管理")
     if st.button("新建会话", use_container_width=True):
         save_session()
@@ -639,9 +657,11 @@ with st.sidebar:
                 st.rerun()
 
 
+# 主流程分为 4 个标签页，分别对应输入、确认、结果与调试。
 tab1, tab2, tab3, tab4 = st.tabs(["1) 约束输入", "2) 参数确认", "3) 结果展示", "4) 调试日志"])
 
 with tab1:
+    # Step 1: 输入约束并触发参数生成。
     st.markdown("### 输入本次调整约束")
     st.text_area(
         "约束描述",
@@ -693,6 +713,7 @@ with tab1:
                     st.success("参数 JSON 已自动生成，请在步骤2核验。")
 
 with tab2:
+    # Step 2: 回显参数并处理“确认/驳回”。
     st.markdown("### 参数 JSON 核验")
     st.info(f"参数由 `{LLM_MODULE}.{LLM_IMPORT_PARAM_FN}` 生成；可在此手动重试生成。")
 
@@ -836,6 +857,7 @@ with tab2:
             st.json(st.session_state.feedback_result)
 
 with tab3:
+    # Step 3: 展示最终结果并支持手动刷新。
     st.markdown("### 最终重排产结果（自动回显）")
     st.info(f"参数确认后会自动调用 `{LLM_MODULE}.{LLM_IMPORT_RESULT_FN}` 获取结果。")
 
@@ -858,6 +880,7 @@ with tab3:
         render_schedule_result(st.session_state.final_result)
 
 with tab4:
+    # Step 4: 调试视图（对话日志 + outbox + llm 会话状态）。
     st.markdown("### 对话日志")
     if st.session_state.messages:
         for message in st.session_state.messages:
